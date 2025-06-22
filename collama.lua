@@ -1,15 +1,14 @@
 -- Collama; LLaMA 4 Hackathon Submission
--- This plugin generates Roblox UI elements using LLaMA's AI model.
+-- This plugin generates Roblox UI elements using AWS Lambda with AI model.
 -- Developed by: Mohammad Mendahawi, Sufyan Waryah, Abdul Mendahawi
 local HttpService = game:GetService("HttpService")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local Selection = game:GetService("Selection")
 
-local GEMINI_API_KEY = "AIzaSyA1TY4WGcHi8ZdjMY1GsMO4SC_UUq3hk8o"
-local GEMINI_API_URL =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" .. GEMINI_API_KEY
+-- CONFIG: point this at your Lambda Function-URL
+local PROXY_URL = "https://a5cootzh5nop7ddrz7heruiyey0bqhgd.lambda-url.us-east-2.on.aws/"
 
-local pluginName = "Collama"
+local pluginName = "fCollama"
 local pluginId = "CollamaPlugin"
 
 -- --- THEME COLORS & SETTINGS ---
@@ -29,6 +28,13 @@ local THEME = {
     Padding = UDim.new(0, 10)
 }
 -- --- END THEME ---
+
+-- Debug helper
+local function dbg(...)
+    print("[" .. pluginName .. "]", ...)
+end
+
+dbg("Plugin initialized. PROXY_URL =", PROXY_URL)
 
 -- Create Toolbar and Button
 local toolbar = plugin:CreateToolbar(pluginName)
@@ -92,10 +98,10 @@ promptTextBox.TextColor3 = THEME.TextColorPrimary
 promptTextBox.BackgroundColor3 = THEME.InputBackgroundColor
 promptTextBox.BorderSizePixel = 1
 promptTextBox.BorderColor3 = THEME.InputBorderColor
-promptTextBox.Size = UDim2.new(1, 0, 0, 180) -- **FIX**: Changed to a fixed height for stability in UIListLayout
+promptTextBox.Size = UDim2.new(1, 0, 0, 180)
 promptTextBox.TextSize = 14
-promptTextBox.TextXAlignment = Enum.TextXAlignment.Left -- **FIX**: Explicitly align text to the left
-promptTextBox.TextYAlignment = Enum.TextYAlignment.Top -- **FIX**: Explicitly align text to the top
+promptTextBox.TextXAlignment = Enum.TextXAlignment.Left
+promptTextBox.TextYAlignment = Enum.TextYAlignment.Top
 promptTextBox.ClipsDescendants = true
 promptTextBox.Parent = mainFrame
 
@@ -143,67 +149,52 @@ statusLabel.BackgroundTransparency = 1
 statusLabel.Size = UDim2.new(1, 0, 0, 30)
 statusLabel.Parent = mainFrame
 
--- Function to make the API call
-local function generateCodeWithGemini(promptText)
-    if GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE" or not GEMINI_API_KEY then
-        statusLabel.Text = "Error: Please set your Gemini API Key in the plugin script."
-        warn(pluginName .. ": API Key not set.")
-        return nil
+-- Function to call AWS Lambda
+local function callLambda(spec)
+    dbg("User spec:", spec)
+    local enrichedPrompt =
+        "You are a Lua expert helping build Roblox UI. Generate Lua code that creates this UI in Roblox: " .. spec ..
+            ". The output should only include valid Lua code using Roblox APIs."
+
+    local body = HttpService:JSONEncode({
+        spec = enrichedPrompt
+    })
+
+    dbg("→ Payload:", body)
+
+    local res = HttpService:RequestAsync({
+        Url = PROXY_URL,
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json"
+        },
+        Body = body
+    })
+
+    dbg("← HTTP", res.StatusCode, res.StatusMessage)
+    dbg("← Body:", res.Body)
+
+    if not res.Success then
+        error(("Proxy call failed (%d)"):format(res.StatusCode))
     end
 
+    local data = HttpService:JSONDecode(res.Body)
+    local code = data.final_code or data.assistant or ""
+    dbg("▶ AI Snippet ▶\n" .. code .. "\n▶ End ▶")
+    return code
+end
+
+-- Function to make the API call using Lambda
+local function generateCodeWithLambda(promptText)
     statusLabel.Text = "Preparing request..."
     generateButton.Active = false
     generateButton.BackgroundColor3 = THEME.ButtonDisabledBackgroundColor
     generateButton.TextColor3 = THEME.ButtonDisabledTextColor
     generateButton.Text = generatingButtonText
 
-    local fullPrompt = table.concat(
-        {"You are an expert Roblox Luau script generator. Your task is to generate only Luau code that creates UI elements in Roblox Studio.",
-         "The generated code should be self-contained and create the UI elements directly.",
-         "Assume the script will be parented to a suitable container (like a ScreenGui) by the plugin, so use 'script.Parent' to refer to this container.",
-         "If the user asks for a 'ScreenGui', create one. Otherwise, create elements directly under 'script.Parent'.",
-         "Do NOT include any markdown like ```lua or ```. Only output the raw Luau code.",
-         "Ensure all created Instances have their Parent property set last, after all other properties.",
-         "Use modern Roblox UI practices like UICorner where appropriate if the user implies a modern look.",
-         "\nUser's request: " .. promptText}, "\n")
+    statusLabel.Text = "Sending to Lambda AI..."
 
-    local requestBody = {
-        contents = {{
-            parts = {{
-                text = fullPrompt
-            }}
-        }},
-        generationConfig = {
-            temperature = 0.7,
-            maxOutputTokens = 2048
-        },
-        safetySettings = {{
-            category = "HARM_CATEGORY_HARASSMENT",
-            threshold = "BLOCK_NONE"
-        }, {
-            category = "HARM_CATEGORY_HATE_SPEECH",
-            threshold = "BLOCK_NONE"
-        }, {
-            category = "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            threshold = "BLOCK_NONE"
-        }, {
-            category = "HARM_CATEGORY_DANGEROUS_CONTENT",
-            threshold = "BLOCK_NONE"
-        }}
-    }
-
-    statusLabel.Text = "Sending to Gemini AI..."
-
-    local success, responseWrapper = pcall(function()
-        return HttpService:RequestAsync({
-            Url = GEMINI_API_URL,
-            Method = "POST",
-            Headers = {
-                ["Content-Type"] = "application/json"
-            },
-            Body = HttpService:JSONEncode(requestBody)
-        })
-    end)
+    local success, generatedCode = pcall(callLambda, promptText)
 
     generateButton.Active = true
     generateButton.BackgroundColor3 = originalButtonColor
@@ -211,48 +202,17 @@ local function generateCodeWithGemini(promptText)
     generateButton.Text = originalButtonText
 
     if not success then
-        statusLabel.Text = "Critical Error: RequestAsync failed. " .. tostring(responseWrapper)
-        warn(pluginName .. ": pcall for RequestAsync failed:", responseWrapper)
+        statusLabel.Text = "Lambda Error: " .. tostring(generatedCode)
+        warn(pluginName .. ": Lambda call failed:", generatedCode)
         return nil
     end
 
-    if not responseWrapper or not responseWrapper.Success then
-        statusLabel.Text = "API request failed (" .. (responseWrapper and responseWrapper.StatusCode or "N/A") ..
-                               "). Check Output."
-        warn(pluginName .. ": API Request Failed. Full response:", responseWrapper)
-        return nil
-    end
-
-    statusLabel.Text = "Decoding response..."
-
-    local responseData
-    local decodeSuccess, decodeResult = pcall(function()
-        responseData = HttpService:JSONDecode(responseWrapper.Body)
-    end)
-
-    if not decodeSuccess then
-        statusLabel.Text = "Error: Failed to decode API JSON response."
-        warn(pluginName .. ": JSON Decode Error: ", decodeResult, "Original Body:", responseWrapper.Body)
-        return nil
-    end
-
-    if responseData.candidates and responseData.candidates[1] and responseData.candidates[1].content and
-        responseData.candidates[1].content.parts and responseData.candidates[1].content.parts[1] and
-        responseData.candidates[1].content.parts[1].text then
-
-        local generatedCode = responseData.candidates[1].content.parts[1].text
-        -- Clean the response from markdown code blocks
-        generatedCode = generatedCode:gsub("^```lua\n", ""):gsub("\n```$", ""):gsub("`", "")
-
+    if generatedCode and #generatedCode > 0 then
         statusLabel.Text = "Code extracted. Generating UI..."
         return generatedCode
     else
-        local errMessage = "Unexpected API response format."
-        if responseData.error then
-            errMessage = "API Error: " .. (responseData.error.message or "Unknown")
-        end
-        statusLabel.Text = errMessage
-        warn(pluginName .. ": Gemini API response format issue. Full response data:", responseData)
+        statusLabel.Text = "No code returned from Lambda."
+        warn(pluginName .. ": Empty response from Lambda")
         return nil
     end
 end
@@ -264,7 +224,7 @@ local function executeGeneratedCode(codeToExecute)
         return
     end
 
-    ChangeHistoryService:SetWaypoint("Before Gemini UI Generation")
+    ChangeHistoryService:SetWaypoint("Before Lambda UI Generation")
 
     local targetParent = game:GetService("StarterGui")
     local selectedObjects = Selection:Get()
@@ -273,14 +233,14 @@ local function executeGeneratedCode(codeToExecute)
         statusLabel.Text = "Targeting: " .. targetParent.Name
     else
         local screenGui = Instance.new("ScreenGui")
-        screenGui.Name = "GeminiGeneratedUI"
+        screenGui.Name = "LambdaGeneratedUI"
         screenGui.Parent = game:GetService("StarterGui")
         targetParent = screenGui
         statusLabel.Text = "Created new ScreenGui."
     end
 
     local tempScript = Instance.new("Script")
-    tempScript.Name = "GeminiExecutor_" .. HttpService:GenerateGUID(false)
+    tempScript.Name = "LambdaExecutor_" .. HttpService:GenerateGUID(false)
 
     local success, err = pcall(function()
         local func, loadErr = loadstring(codeToExecute)
@@ -305,12 +265,12 @@ local function executeGeneratedCode(codeToExecute)
 
     if success then
         statusLabel.Text = "Successfully generated UI in " .. targetParent:GetFullName()
-        ChangeHistoryService:SetWaypoint("After Gemini UI Generation")
+        ChangeHistoryService:SetWaypoint("After Lambda UI Generation")
     else
         statusLabel.Text = "Error executing code. Check Output for details."
         warn(pluginName .. ": Error executing generated code - ", err)
         ChangeHistoryService:TryUndo()
-        if targetParent.Name == "GeminiGeneratedUI" and #targetParent:GetChildren() == 0 then
+        if targetParent.Name == "LambdaGeneratedUI" and #targetParent:GetChildren() == 0 then
             targetParent:Destroy() -- Clean up empty generated ScreenGui on failure
         end
     end
@@ -337,7 +297,7 @@ generateButton.MouseButton1Click:Connect(function()
     local prompt = promptTextBox.Text
     if prompt and #prompt > 3 then
         task.spawn(function()
-            local generatedCode = generateCodeWithGemini(prompt)
+            local generatedCode = generateCodeWithLambda(prompt)
             if generatedCode then
                 executeGeneratedCode(generatedCode)
             end
